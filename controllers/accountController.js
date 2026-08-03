@@ -102,8 +102,10 @@ async function withdraw(req, res) {
     res.status(500).json({ message: 'Server error', error: err.message });
   } finally {
     conn.release();
+  }
+}
 
-    async function transfer(req, res) {
+async function transfer(req, res) {
   const conn = await db.getConnection();
   try {
     const { from_account_id, to_account_number, amount } = req.body;
