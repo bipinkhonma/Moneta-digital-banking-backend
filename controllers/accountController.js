@@ -1,5 +1,5 @@
 const db = require('../config/db');
-
+const { createNotification } = require('./notificationController'); 
 function generateAccountNumber() {
   return 'ACC' + Date.now().toString().slice(-10);
 }
@@ -46,6 +46,7 @@ async function deposit(req, res) {
       [account_id, req.user.user_id]
     );
     if (!account) { await conn.rollback(); return res.status(404).json({ message: 'Account not found' }); }
+    if (account.status !== 'active') { await conn.rollback(); return res.status(403).json({ message: 'This account is not active' }); }
 
     const newBalance = Number(account.balance) + Number(amount);
     await conn.query('UPDATE accounts SET balance = ? WHERE account_id = ?', [newBalance, account_id]);
@@ -58,6 +59,7 @@ async function deposit(req, res) {
     );
 
     await conn.commit();
+    await createNotification(req.user.user_id, 'Deposit Successful', `Your account was credited with ${amount}.`);
     res.json({ message: 'Deposit successful', new_balance: newBalance });
   } catch (err) {
     await conn.rollback();
@@ -76,10 +78,11 @@ async function withdraw(req, res) {
     await conn.beginTransaction();
 
     const [[account]] = await conn.query(
-      'SELECT balance FROM accounts WHERE account_id = ? AND user_id = ? FOR UPDATE',
+      'SELECT balance, status FROM accounts WHERE account_id = ? AND user_id = ? FOR UPDATE',
       [account_id, req.user.user_id]
     );
     if (!account) { await conn.rollback(); return res.status(404).json({ message: 'Account not found' }); }
+    if (account.status !== 'active') { await conn.rollback(); return res.status(403).json({ message: 'This account is not active' }); }
     if (Number(account.balance) < Number(amount)) {
       await conn.rollback();
       return res.status(400).json({ message: 'Insufficient balance' });

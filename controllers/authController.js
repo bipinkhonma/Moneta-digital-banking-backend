@@ -2,11 +2,22 @@ const bcrypt = require('bcrypt');
 const db = require('../config/db');
 const generateToken = require('../utils/generateToken');
 
+async function logLogin(user_id, status) {
+  await db.query('INSERT INTO login_history (user_id, status) VALUES (?, ?)', [user_id, status]);
+}
+
 async function register(req, res) {
   try {
     const { full_name, email, phone, password } = req.body;
     if (!full_name || !email || !phone || !password) {
       return res.status(400).json({ message: 'All fields are required' });
+    }
+    if (password.length < 6) {
+      return res.status(400).json({ message: 'Password must be at least 6 characters' });
+    }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ message: 'Invalid email format' });
     }
     const [existing] = await db.query(
       'SELECT user_id FROM users WHERE email = ? OR phone = ?',
@@ -42,8 +53,10 @@ async function login(req, res) {
     const user = rows[0];
     const isMatch = await bcrypt.compare(password, user.password_hash);
     if (!isMatch) {
+      await logLogin(user.user_id, 'failed');
       return res.status(401).json({ message: 'Invalid email or password' });
     }
+    await logLogin(user.user_id, 'success');
     const token = generateToken(user);
     res.json({
       message: 'Login successful',
