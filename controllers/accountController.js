@@ -24,22 +24,45 @@ async function createAccount(req, res) {
 async function getMyAccounts(req, res) {
   try {
     const user_id = req.user.user_id;
-    const [accounts] = await db.query(
+    let [accounts] = await db.query(
       'SELECT account_id, account_number, balance, currency, status FROM accounts WHERE user_id = ?',
       [user_id]
     );
+    if (accounts.length === 0) {
+      const [[accountType]] = await db.query(
+        'SELECT account_type_id FROM account_types ORDER BY account_type_id LIMIT 1'
+      );
+      if (accountType) {
+        const accountNumber = generateAccountNumber();
+        await db.query(
+          `INSERT INTO accounts (account_number, user_id, account_type_id, balance, status)
+           VALUES (?, ?, ?, 0.00, 'active')`,
+          [accountNumber, user_id, accountType.account_type_id]
+        );
+        [accounts] = await db.query(
+          'SELECT account_id, account_number, balance, currency, status FROM accounts WHERE user_id = ?',
+          [user_id]
+        );
+      }
+    }
     res.json({ accounts });
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 }
 async function deposit(req, res) {
-  const conn = await db.getConnection();
+  let conn;
+  let transactionStarted = false;
   try {
     const { account_id, amount } = req.body;
-    if (!amount || amount <= 0) return res.status(400).json({ message: 'Invalid amount' });
+    const numericAmount = Number(amount);
+    if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
+      return res.status(400).json({ message: 'Invalid amount' });
+    }
 
+    conn = await db.getConnection();
     await conn.beginTransaction();
+    transactionStarted = true;
 const [[account]] = await conn.query(
   'SELECT balance, status FROM accounts WHERE account_id = ? AND user_id = ? FOR UPDATE',
   [account_id, req.user.user_id]
@@ -47,34 +70,53 @@ const [[account]] = await conn.query(
 if (!account) { await conn.rollback(); return res.status(404).json({ message: 'Account not found' }); }
 if (account.status !== 'active') { await conn.rollback(); return res.status(403).json({ message: 'This account is not active' }); }
 
-    const newBalance = Number(account.balance) + Number(amount);
+    const newBalance = Number(account.balance) + numericAmount;
+    const [[transactionType]] = await conn.query(
+      "SELECT transaction_type_id FROM transaction_types WHERE LOWER(type_name) = 'deposit' LIMIT 1"
+    );
+    if (!transactionType) {
+      await conn.rollback();
+      transactionStarted = false;
+      return res.status(500).json({ message: 'Deposit transaction type is not configured' });
+    }
     await conn.query('UPDATE accounts SET balance = ? WHERE account_id = ?', [newBalance, account_id]);
 
     const ref = 'TXN' + Date.now();
     await conn.query(
       `INSERT INTO transactions (reference_number, source_account_id, transaction_type_id, amount, balance_after_source, status, initiated_by)
-       VALUES (?, ?, (SELECT transaction_type_id FROM transaction_types WHERE type_name='deposit'), ?, ?, 'completed', ?)`,
-      [ref, account_id, amount, newBalance, req.user.user_id]
+       VALUES (?, ?, ?, ?, ?, 'completed', ?)`,
+      [ref, account_id, transactionType.transaction_type_id, numericAmount, newBalance, req.user.user_id]
     );
 
     await conn.commit();
-    await createNotification(req.user.user_id, 'Deposit Successful', `Your account was credited with ${amount}.`);
+    transactionStarted = false;
+    try {
+      await createNotification(req.user.user_id, 'Deposit Successful', `Your account was credited with ${numericAmount}.`);
+    } catch (notificationError) {
+      console.error('Deposit notification failed:', notificationError.message);
+    }
     res.json({ message: 'Deposit successful', new_balance: newBalance });
   } catch (err) {
-    await conn.rollback();
+    if (conn && transactionStarted) await conn.rollback();
     res.status(500).json({ message: 'Server error', error: err.message });
   } finally {
-    conn.release();
+    if (conn) conn.release();
   }
 }
 
 async function withdraw(req, res) {
-  const conn = await db.getConnection();
+  let conn;
+  let transactionStarted = false;
   try {
     const { account_id, amount } = req.body;
-    if (!amount || amount <= 0) return res.status(400).json({ message: 'Invalid amount' });
+    const numericAmount = Number(amount);
+    if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
+      return res.status(400).json({ message: 'Invalid amount' });
+    }
 
+    conn = await db.getConnection();
     await conn.beginTransaction();
+    transactionStarted = true;
 
     const [[account]] = await conn.query(
       'SELECT balance, status FROM accounts WHERE account_id = ? AND user_id = ? FOR UPDATE',
@@ -82,28 +124,38 @@ async function withdraw(req, res) {
     );
     if (!account) { await conn.rollback(); return res.status(404).json({ message: 'Account not found' }); }
     if (account.status !== 'active') { await conn.rollback(); return res.status(403).json({ message: 'This account is not active' }); }
-    if (Number(account.balance) < Number(amount)) {
+    if (Number(account.balance) < numericAmount) {
       await conn.rollback();
+      transactionStarted = false;
       return res.status(400).json({ message: 'Insufficient balance' });
     }
 
-    const newBalance = Number(account.balance) - Number(amount);
+    const newBalance = Number(account.balance) - numericAmount;
+    const [[transactionType]] = await conn.query(
+      "SELECT transaction_type_id FROM transaction_types WHERE LOWER(type_name) = 'withdrawal' LIMIT 1"
+    );
+    if (!transactionType) {
+      await conn.rollback();
+      transactionStarted = false;
+      return res.status(500).json({ message: 'Withdrawal transaction type is not configured' });
+    }
     await conn.query('UPDATE accounts SET balance = ? WHERE account_id = ?', [newBalance, account_id]);
 
     const ref = 'TXN' + Date.now();
     await conn.query(
       `INSERT INTO transactions (reference_number, source_account_id, transaction_type_id, amount, balance_after_source, status, initiated_by)
-       VALUES (?, ?, (SELECT transaction_type_id FROM transaction_types WHERE type_name='withdrawal'), ?, ?, 'completed', ?)`,
-      [ref, account_id, amount, newBalance, req.user.user_id]
+       VALUES (?, ?, ?, ?, ?, 'completed', ?)`,
+      [ref, account_id, transactionType.transaction_type_id, numericAmount, newBalance, req.user.user_id]
     );
 
     await conn.commit();
+    transactionStarted = false;
     res.json({ message: 'Withdrawal successful', new_balance: newBalance });
   } catch (err) {
-    await conn.rollback();
+    if (conn && transactionStarted) await conn.rollback();
     res.status(500).json({ message: 'Server error', error: err.message });
   } finally {
-    conn.release();
+    if (conn) conn.release();
   }
 }
 
@@ -158,7 +210,11 @@ async function getTransactionHistory(req, res) {
   try {
     const { account_id } = req.params;
     const [txns] = await db.query(
-      `SELECT * FROM transactions WHERE source_account_id = ? OR destination_account_id = ? ORDER BY created_at DESC`,
+      `SELECT transactions.*, transaction_types.type_name AS type
+       FROM transactions
+       JOIN transaction_types ON transactions.transaction_type_id = transaction_types.transaction_type_id
+       WHERE source_account_id = ? OR destination_account_id = ?
+       ORDER BY created_at DESC`,
       [account_id, account_id]
     );
     res.json({ transactions: txns });

@@ -32,7 +32,34 @@ async function register(req, res) {
        VALUES (?, ?, ?, ?, (SELECT role_id FROM roles WHERE role_name = 'Customer'))`,
       [full_name, email, phone, password_hash]
     );
+    const [[accountType]] = await db.query(
+      'SELECT account_type_id FROM account_types ORDER BY account_type_id LIMIT 1'
+    );
+    if (!accountType) {
+      return res.status(500).json({ message: 'No account type is configured' });
+    }
+    const accountNumber = `ACC${Date.now().toString().slice(-10)}`;
+    await db.query(
+      `INSERT INTO accounts (account_number, user_id, account_type_id, balance, status)
+       VALUES (?, ?, ?, 0.00, 'active')`,
+      [accountNumber, result.insertId, accountType.account_type_id]
+    );
     res.status(201).json({ message: 'Registration successful', user_id: result.insertId });
+  } catch (err) {
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+}
+
+async function getCurrentUser(req, res) {
+  try {
+    const [[user]] = await db.query(
+      `SELECT u.user_id, u.full_name, u.email, r.role_name
+       FROM users u JOIN roles r ON u.role_id = r.role_id
+       WHERE u.user_id = ?`,
+      [req.user.user_id]
+    );
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    res.json({ user_id: user.user_id, full_name: user.full_name, email: user.email, role: user.role_name });
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
@@ -68,4 +95,4 @@ async function login(req, res) {
   }
 }
 
-module.exports = { register, login };
+module.exports = { register, login, getCurrentUser };
